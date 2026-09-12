@@ -158,7 +158,7 @@ async function enviarBienvenida(chatId, userId) {
 
   if (sorteo) {
     text += `🎯 *Sorteo activo:* ${sorteo.titulo}\n`;
-    text += `🎟 *Precio:* ${sorteo.precioPorBoleto} ⭐ por boleto\n`;
+    text += `🎟 *Precio:* *$1 USD* (${sorteo.precioPorBoleto} ⭐) por boleto\n`;
     text += `📊 *Vendidos:* ${vendidos}/${sorteo.metaBoletos}\n\n`;
     text += `🏆 *Premios:*\n`;
     sorteo.premios.forEach(p => {
