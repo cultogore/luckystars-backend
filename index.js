@@ -1,6 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const fetch = require('node-fetch');
+const { MongoClient } = require('mongodb');
 
 const app = express();
 app.use(cors());
@@ -9,72 +10,68 @@ app.use(express.json());
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin123';
 const CANAL_ID = process.env.CANAL_ID || '@LuckyStarsOficial';
+const MONGODB_URI = process.env.MONGODB_URI;
+const FRONTEND_URL = process.env.FRONTEND_URL || 'https://cultogore.github.io/luckystars-frontend/';
 const PORT = process.env.PORT || 3000;
 
-// ─── BASE DE DATOS EN MEMORIA ───────────────────────────────────────────────
-let db = {
-  sorteos: [],
-  usuarios: {}, // userId -> { username, firstName, boletos, referidoPor, referidos, joinedCanal, totalComprado }
-  sorteoActualId: null,
-  historial: []
-};
+let db;
 
-// Crear sorteo inicial de ejemplo
-function crearSorteoInicial() {
-  const sorteo = {
-    id: generarId(),
-    titulo: 'Sorteo #1 — Lucky Stars',
-    activo: true,
-    precioPorBoleto: 50, // Stars (50 Stars = $1 USD)
-    metaBoletos: 100,
-    premios: [
-      { lugar: 1, descripcion: '1er Premio', monto: 2500, moneda: 'Stars' },
-      { lugar: 2, descripcion: '2do Premio', monto: 1000, moneda: 'Stars' },
-      { lugar: 3, descripcion: '3er Premio', monto: 500, moneda: 'Stars' }
-    ],
-    boletos: [], // { numero, userId, username, fecha, esBoletoGratis }
-    ganadores: [],
-    fechaCreacion: new Date().toISOString(),
-    fechaFin: null,
-    totalRecaudado: 0
-  };
-  db.sorteos.push(sorteo);
-  db.sorteoActualId = sorteo.id;
-  return sorteo;
+async function connectDB() {
+  const client = new MongoClient(MONGODB_URI);
+  await client.connect();
+  db = client.db('luckystars');
+  console.log('MongoDB conectado');
+
+  // Crear sorteo inicial si no existe
+  const sorteoActivo = await db.collection('sorteos').findOne({ activo: true });
+  if (!sorteoActivo) {
+    await db.collection('sorteos').insertOne({
+      titulo: 'Sorteo #1 — Lucky Stars',
+      activo: true,
+      precioPorBoleto: 50,
+      metaBoletos: 100,
+      premios: [
+        { lugar: 1, descripcion: '1er Premio', monto: 2500, moneda: 'Stars' },
+        { lugar: 2, descripcion: '2do Premio', monto: 1000, moneda: 'Stars' },
+        { lugar: 3, descripcion: '3er Premio', monto: 500, moneda: 'Stars' }
+      ],
+      boletos: [],
+      ganadores: [],
+      fechaCreacion: new Date().toISOString(),
+      fechaFin: null,
+      totalRecaudado: 0
+    });
+    console.log('Sorteo inicial creado');
+  }
 }
 
 function generarId() {
   return Math.random().toString(36).substr(2, 9);
 }
 
-function getSorteoActual() {
-  return db.sorteos.find(s => s.id === db.sorteoActualId);
+async function getSorteoActivo() {
+  return db.collection('sorteos').findOne({ activo: true });
 }
 
-function getSorteoById(id) {
-  return db.sorteos.find(s => s.id === id);
-}
-
-function getUsuario(userId) {
-  if (!db.usuarios[userId]) {
-    db.usuarios[userId] = {
+async function getUsuario(userId) {
+  let usuario = await db.collection('usuarios').findOne({ userId });
+  if (!usuario) {
+    usuario = {
       userId,
       username: '',
       firstName: '',
-      boletos: 0,
       referidoPor: null,
-      referidos: [],
       referidosQueCompraron: 0,
       joinedCanal: false,
       totalComprado: 0,
       boletosGratisCanal: false,
       fechaRegistro: new Date().toISOString()
     };
+    await db.collection('usuarios').insertOne(usuario);
   }
-  return db.usuarios[userId];
+  return usuario;
 }
 
-// ─── TELEGRAM API ────────────────────────────────────────────────────────────
 async function callTelegram(method, data) {
   const url = `https://api.telegram.org/bot${BOT_TOKEN}/${method}`;
   const res = await fetch(url, {
@@ -87,18 +84,10 @@ async function callTelegram(method, data) {
 
 async function verificarMembresia(userId) {
   try {
-    const res = await callTelegram('getChatMember', {
-      chat_id: CANAL_ID,
-      user_id: userId
-    });
-    if (res.ok) {
-      const status = res.result.status;
-      return ['member', 'administrator', 'creator'].includes(status);
-    }
+    const res = await callTelegram('getChatMember', { chat_id: CANAL_ID, user_id: userId });
+    if (res.ok) return ['member', 'administrator', 'creator'].includes(res.result.status);
     return false;
-  } catch (e) {
-    return false;
-  }
+  } catch (e) { return false; }
 }
 
 async function enviarMensaje(chatId, text, extra = {}) {
@@ -110,22 +99,20 @@ app.post('/webhook', async (req, res) => {
   const update = req.body;
 
   if (update.pre_checkout_query) {
-    await callTelegram('answerPreCheckoutQuery', {
-      pre_checkout_query_id: update.pre_checkout_query.id,
-      ok: true
-    });
+    await callTelegram('answerPreCheckoutQuery', { pre_checkout_query_id: update.pre_checkout_query.id, ok: true });
   }
 
   if (update.message) {
     const msg = update.message;
     const userId = String(msg.from.id);
-    const usuario = getUsuario(userId);
-    usuario.username = msg.from.username || '';
-    usuario.firstName = msg.from.first_name || '';
+    const usuario = await getUsuario(userId);
 
-    if (msg.successful_payment) {
-      await procesarPago(msg);
-    }
+    await db.collection('usuarios').updateOne(
+      { userId },
+      { $set: { username: msg.from.username || '', firstName: msg.from.first_name || '' } }
+    );
+
+    if (msg.successful_payment) await procesarPago(msg);
 
     if (msg.text) {
       if (msg.text.startsWith('/start')) {
@@ -133,7 +120,7 @@ app.post('/webhook', async (req, res) => {
         if (params && params.startsWith('ref_')) {
           const referidorId = params.replace('ref_', '');
           if (referidorId !== userId && !usuario.referidoPor) {
-            usuario.referidoPor = referidorId;
+            await db.collection('usuarios').updateOne({ userId }, { $set: { referidoPor: referidorId } });
           }
         }
         await enviarBienvenida(msg.chat.id, userId);
@@ -149,13 +136,10 @@ app.post('/webhook', async (req, res) => {
 });
 
 async function enviarBienvenida(chatId, userId) {
-  const sorteo = getSorteoActual();
-  const usuario = getUsuario(userId);
-  const vendidos = sorteo ? sorteo.boletos.filter(b => !b.esBoletoGratis || b.pagado).length : 0;
+  const sorteo = await getSorteoActivo();
+  const vendidos = sorteo ? sorteo.boletos.filter(b => b.pagado).length : 0;
 
-  let text = `⭐ *Bienvenido a Lucky Stars*\n\n`;
-  text += `El sorteo de Telegram más emocionante.\n\n`;
-
+  let text = `⭐ *Bienvenido a Lucky Stars*\n\nEl sorteo de Telegram más emocionante.\n\n`;
   if (sorteo) {
     text += `🎯 *Sorteo activo:* ${sorteo.titulo}\n`;
     text += `🎟 *Precio:* *$1 USD* (${sorteo.precioPorBoleto} ⭐) por boleto\n`;
@@ -166,7 +150,6 @@ async function enviarBienvenida(chatId, userId) {
       text += `${p.lugar === 1 ? '🥇' : p.lugar === 2 ? '🥈' : '🥉'} ${p.descripcion}: *$${usd} USD* (${p.monto} ⭐)\n`;
     });
   }
-
   text += `\n🎁 *Boleto gratis:* Únete a @LuckyStarsOficial y escribe /gratis\n`;
   text += `👥 *Referidos:* Invita amigos y gana boletos extra\n\n`;
   text += `Usa el botón de abajo para participar 👇`;
@@ -174,179 +157,136 @@ async function enviarBienvenida(chatId, userId) {
   await enviarMensaje(chatId, text, {
     reply_markup: {
       inline_keyboard: [
-        [{ text: '🎟 Comprar Boletos', web_app: { url: process.env.FRONTEND_URL || 'https://luckystars-oficial.github.io/luckystars-frontend/' } }],
+        [{ text: '🎟 Comprar Boletos', web_app: { url: FRONTEND_URL } }],
         [{ text: '⭐ Canal Oficial', url: 'https://t.me/LuckyStarsOficial' }],
-        [{ text: '👥 Invitar Amigos', callback_data: 'referido_' + userId }]
+        [{ text: '👥 Invitar Amigos', callback_data: 'ref_' + userId }]
       ]
     }
   });
 }
 
 async function procesarBoletosGratis(chatId, userId) {
-  const usuario = getUsuario(userId);
-  const sorteo = getSorteoActual();
+  const sorteo = await getSorteoActivo();
+  const usuario = await getUsuario(userId);
 
-  if (!sorteo || !sorteo.activo) {
-    await enviarMensaje(chatId, '❌ No hay sorteo activo en este momento.');
-    return;
-  }
-
-  if (usuario.boletosGratisCanal) {
-    await enviarMensaje(chatId, '⚠️ Ya reclamaste tu boleto gratis por unirte al canal.');
-    return;
-  }
+  if (!sorteo || !sorteo.activo) { await enviarMensaje(chatId, '❌ No hay sorteo activo.'); return; }
+  if (usuario.boletosGratisCanal) { await enviarMensaje(chatId, '⚠️ Ya reclamaste tu boleto gratis por unirte al canal.'); return; }
 
   const esMiembro = await verificarMembresia(userId);
   if (!esMiembro) {
-    await enviarMensaje(chatId, `❌ No eres miembro de @LuckyStarsOficial.\n\nÚnete primero y luego escribe /gratis para reclamar tu boleto.`, {
-      reply_markup: {
-        inline_keyboard: [[{ text: '⭐ Unirse al Canal', url: 'https://t.me/LuckyStarsOficial' }]]
-      }
+    await enviarMensaje(chatId, `❌ No eres miembro de @LuckyStarsOficial.\n\nÚnete primero y luego escribe /gratis.`, {
+      reply_markup: { inline_keyboard: [[{ text: '⭐ Unirse al Canal', url: 'https://t.me/LuckyStarsOficial' }]] }
     });
     return;
   }
 
-  // Dar boleto gratis
-  sorteo.boletos.push({
-    numero: String(sorteo.boletos.length + 1).padStart(3, '0'),
-    userId,
-    username: usuario.username || usuario.firstName,
-    fecha: new Date().toLocaleDateString('es-MX'),
-    esBoletoGratis: true,
-    pagado: true,
-    motivo: 'canal'
-  });
+  const numero = String(sorteo.boletos.length + 1).padStart(3, '0');
+  const boleto = { numero, userId, username: usuario.username || usuario.firstName, fecha: new Date().toLocaleDateString('es-MX'), esBoletoGratis: true, pagado: true, motivo: 'canal' };
 
-  usuario.boletosGratisCanal = true;
-  usuario.joinedCanal = true;
+  await db.collection('sorteos').updateOne({ activo: true }, { $push: { boletos: boleto } });
+  await db.collection('usuarios').updateOne({ userId }, { $set: { boletosGratisCanal: true, joinedCanal: true } });
 
-  await enviarMensaje(chatId, `✅ *¡Boleto gratis reclamado!*\n\nTu boleto #${String(sorteo.boletos.length).padStart(3, '0')} está en el sorteo.\n\n¡Buena suerte! ⭐`);
+  await enviarMensaje(chatId, `✅ *¡Boleto gratis reclamado!*\n\nTu boleto #${numero} está en el sorteo.\n\n¡Buena suerte! ⭐`);
 }
 
 async function procesarPago(msg) {
   const payment = msg.successful_payment;
   const userId = String(msg.from.id);
-  const usuario = getUsuario(userId);
-  const payload = payment.invoice_payload;
-  const partes = payload.split('_');
+  const usuario = await getUsuario(userId);
+  const partes = payment.invoice_payload.split('_');
   const cantidad = parseInt(partes[1]);
   const sorteoId = partes[2];
 
-  const sorteo = getSorteoById(sorteoId);
-  if (!sorteo || !sorteo.activo) {
-    await enviarMensaje(msg.chat.id, '❌ El sorteo ya terminó.');
-    return;
-  }
+  const sorteo = await db.collection('sorteos').findOne({ _id: require('mongodb').ObjectId ? undefined : sorteoId, activo: true });
+  if (!sorteo) { await enviarMensaje(msg.chat.id, '❌ El sorteo ya terminó.'); return; }
 
   const nuevosNumeros = [];
+  const nuevosBoletos = [];
+
   for (let i = 0; i < cantidad; i++) {
-    const numero = String(sorteo.boletos.length + 1).padStart(3, '0');
-    sorteo.boletos.push({
-      numero,
-      userId,
-      username: usuario.username || usuario.firstName,
-      fecha: new Date().toLocaleDateString('es-MX'),
-      esBoletoGratis: false,
-      pagado: true
-    });
+    const numero = String(sorteo.boletos.length + nuevosBoletos.length + 1).padStart(3, '0');
+    nuevosBoletos.push({ numero, userId, username: usuario.username || usuario.firstName, fecha: new Date().toLocaleDateString('es-MX'), esBoletoGratis: false, pagado: true });
     nuevosNumeros.push(numero);
   }
 
-  sorteo.totalRecaudado += payment.total_amount;
-  usuario.totalComprado += cantidad;
+  await db.collection('sorteos').updateOne(
+    { activo: true },
+    { $push: { boletos: { $each: nuevosBoletos } }, $inc: { totalRecaudado: payment.total_amount } }
+  );
+  await db.collection('usuarios').updateOne({ userId }, { $inc: { totalComprado: cantidad } });
 
-  // Procesar referido — si este usuario fue referido y acaba de comprar por primera vez
-  if (usuario.referidoPor && usuario.totalComprado === cantidad) {
-    const referidor = getUsuario(usuario.referidoPor);
-    referidor.referidosQueCompraron += 1;
+  // Procesar referido
+  const usuarioActualizado = await getUsuario(userId);
+  if (usuario.referidoPor && usuarioActualizado.totalComprado === cantidad) {
+    const referidor = await getUsuario(usuario.referidoPor);
+    await db.collection('usuarios').updateOne({ userId: usuario.referidoPor }, { $inc: { referidosQueCompraron: 1 } });
 
-    // Dar boleto gratis al referidor
-    const numBoleto = String(sorteo.boletos.length + 1).padStart(3, '0');
-    sorteo.boletos.push({
-      numero: numBoleto,
-      userId: usuario.referidoPor,
-      username: referidor.username || referidor.firstName,
-      fecha: new Date().toLocaleDateString('es-MX'),
-      esBoletoGratis: true,
-      pagado: true,
-      motivo: 'referido'
-    });
+    const numBoleto = String(sorteo.boletos.length + nuevosBoletos.length + 1).padStart(3, '0');
+    await db.collection('sorteos').updateOne(
+      { activo: true },
+      { $push: { boletos: { numero: numBoleto, userId: usuario.referidoPor, username: referidor.username || referidor.firstName, fecha: new Date().toLocaleDateString('es-MX'), esBoletoGratis: true, pagado: true, motivo: 'referido' } } }
+    );
 
-    // Notificar al referidor
-    try {
-      await enviarMensaje(usuario.referidoPor,
-        `🎉 *¡Boleto gratis ganado!*\n\nTu referido @${usuario.username || usuario.firstName} acaba de comprar su primer boleto.\n\n🎟 Te dimos el boleto #${numBoleto} gratis. ¡Buena suerte!`
-      );
-    } catch (e) {}
+    try { await enviarMensaje(usuario.referidoPor, `🎉 *¡Boleto gratis ganado!*\n\nTu referido @${usuario.username || usuario.firstName} compró su primer boleto.\n\n🎟 Te dimos el boleto #${numBoleto} gratis. ¡Buena suerte!`); } catch (e) {}
 
-    // Bonus por 5 referidos
-    if (referidor.referidosQueCompraron === 5) {
+    const referidorActualizado = await getUsuario(usuario.referidoPor);
+    if (referidorActualizado.referidosQueCompraron === 5) {
       for (let i = 0; i < 2; i++) {
-        const n = String(sorteo.boletos.length + 1).padStart(3, '0');
-        sorteo.boletos.push({ numero: n, userId: usuario.referidoPor, username: referidor.username, fecha: new Date().toLocaleDateString('es-MX'), esBoletoGratis: true, pagado: true, motivo: 'bonus5' });
+        const n = String((await getSorteoActivo()).boletos.length + 1).padStart(3, '0');
+        await db.collection('sorteos').updateOne({ activo: true }, { $push: { boletos: { numero: n, userId: usuario.referidoPor, username: referidor.username, fecha: new Date().toLocaleDateString('es-MX'), esBoletoGratis: true, pagado: true, motivo: 'bonus5' } } });
       }
-      await enviarMensaje(usuario.referidoPor, `🏆 *¡BONUS DESBLOQUEADO!*\n\n¡Lograste 5 referidos que compraron!\n\n🎟 Te regalamos *2 boletos extra*. ¡Sigue invitando!`);
+      try { await enviarMensaje(usuario.referidoPor, `🏆 *¡BONUS!* 5 referidos = *2 boletos extra* 🎟`); } catch (e) {}
     }
 
-    // Bonus por 10 referidos
-    if (referidor.referidosQueCompraron === 10) {
+    if (referidorActualizado.referidosQueCompraron === 10) {
       for (let i = 0; i < 5; i++) {
-        const n = String(sorteo.boletos.length + 1).padStart(3, '0');
-        sorteo.boletos.push({ numero: n, userId: usuario.referidoPor, username: referidor.username, fecha: new Date().toLocaleDateString('es-MX'), esBoletoGratis: true, pagado: true, motivo: 'bonus10' });
+        const n = String((await getSorteoActivo()).boletos.length + 1).padStart(3, '0');
+        await db.collection('sorteos').updateOne({ activo: true }, { $push: { boletos: { numero: n, userId: usuario.referidoPor, username: referidor.username, fecha: new Date().toLocaleDateString('es-MX'), esBoletoGratis: true, pagado: true, motivo: 'bonus10' } } });
       }
-      await enviarMensaje(usuario.referidoPor, `🌟 *¡MEGA BONUS!*\n\n¡10 referidos que compraron!\n\n🎟 Te regalamos *5 boletos extra*. ¡Eres una leyenda!`);
+      try { await enviarMensaje(usuario.referidoPor, `🌟 *¡MEGA BONUS!* 10 referidos = *5 boletos extra* 🎟`); } catch (e) {}
     }
   }
 
-  await enviarMensaje(msg.chat.id,
-    `✅ *¡Compra exitosa!*\n\nTus boletos: ${nuevosNumeros.map(n => '#' + n).join(', ')}\n\n📊 ${sorteo.boletos.filter(b => b.pagado).length}/${sorteo.metaBoletos} boletos vendidos\n\n¡Buena suerte! ⭐`
-  );
+  await enviarMensaje(msg.chat.id, `✅ *¡Compra exitosa!*\n\nTus boletos: ${nuevosNumeros.map(n => '#' + n).join(', ')}\n\n¡Buena suerte! ⭐`);
 
-  if (sorteo.boletos.filter(b => b.pagado).length >= sorteo.metaBoletos) {
-    await realizarSorteo(sorteo);
+  const sorteoFinal = await getSorteoActivo();
+  if (sorteoFinal && sorteoFinal.boletos.filter(b => b.pagado).length >= sorteoFinal.metaBoletos) {
+    await realizarSorteo(sorteoFinal);
   }
 }
 
 async function realizarSorteo(sorteo) {
-  sorteo.activo = false;
-  sorteo.fechaFin = new Date().toISOString();
+  await db.collection('sorteos').updateOne({ activo: true }, { $set: { activo: false, fechaFin: new Date().toISOString() } });
 
   const boletosValidos = sorteo.boletos.filter(b => b.pagado);
   const ganadores = [];
+  const usersGanadores = new Set();
 
   for (let i = 0; i < Math.min(sorteo.premios.length, boletosValidos.length); i++) {
-    let ganadorIdx;
-    do {
-      ganadorIdx = Math.floor(Math.random() * boletosValidos.length);
-    } while (ganadores.find(g => g.userId === boletosValidos[ganadorIdx].userId));
-
-    const boleto = boletosValidos[ganadorIdx];
+    let boleto;
+    do { boleto = boletosValidos[Math.floor(Math.random() * boletosValidos.length)]; }
+    while (usersGanadores.has(boleto.userId));
+    usersGanadores.add(boleto.userId);
     const premio = sorteo.premios[i];
     ganadores.push({ ...boleto, premio });
-
     try {
-      await enviarMensaje(boleto.userId,
-        `🏆 *¡FELICIDADES! ¡GANASTE!*\n\n${premio.lugar === 1 ? '🥇' : premio.lugar === 2 ? '🥈' : '🥉'} ${premio.descripcion}\n💰 Premio: *${premio.monto} ${premio.moneda}*\n🎟 Boleto ganador: #${boleto.numero}\n\nContacta al administrador para reclamar tu premio.`
-      );
+      await enviarMensaje(boleto.userId, `🏆 *¡FELICIDADES! ¡GANASTE!*\n\n${['🥇','🥈','🥉'][i]} ${premio.descripcion}\n💰 *$${(premio.monto/50).toFixed(0)} USD* (${premio.monto} ⭐)\n🎟 Boleto: #${boleto.numero}\n\nContacta al administrador para reclamar.`);
     } catch (e) {}
   }
 
-  sorteo.ganadores = ganadores;
-  db.historial.push({ sorteoId: sorteo.id, titulo: sorteo.titulo, ganadores, fecha: new Date().toISOString() });
-  db.sorteoActualId = null;
+  await db.collection('sorteos').updateOne({ activo: false, fechaFin: { $exists: true } }, { $set: { ganadores } });
+  await db.collection('historial').insertOne({ sorteoId: sorteo._id, titulo: sorteo.titulo, ganadores, fecha: new Date().toISOString() });
 }
 
 async function enviarEstadoSorteo(chatId) {
-  const sorteo = getSorteoActual();
+  const sorteo = await getSorteoActivo();
   if (!sorteo) { await enviarMensaje(chatId, '❌ No hay sorteo activo.'); return; }
   const vendidos = sorteo.boletos.filter(b => b.pagado).length;
-  await enviarMensaje(chatId,
-    `📊 *${sorteo.titulo}*\n\n🎟 Vendidos: ${vendidos}/${sorteo.metaBoletos}\n⏳ Restantes: ${sorteo.metaBoletos - vendidos}\n💰 Precio: ${sorteo.precioPorBoleto} ⭐\n\n🏆 *Premios:*\n${sorteo.premios.map(p => `${p.lugar === 1 ? '🥇' : p.lugar === 2 ? '🥈' : '🥉'} ${p.descripcion}: ${p.monto} ⭐`).join('\n')}`
-  );
+  await enviarMensaje(chatId, `📊 *${sorteo.titulo}*\n\n🎟 Vendidos: ${vendidos}/${sorteo.metaBoletos}\n⏳ Restantes: ${sorteo.metaBoletos - vendidos}\n💰 Precio: *$1 USD* (${sorteo.precioPorBoleto} ⭐)\n\n🏆 *Premios:*\n${sorteo.premios.map((p,i) => `${['🥇','🥈','🥉'][i]} ${p.descripcion}: *$${(p.monto/50).toFixed(0)} USD* (${p.monto} ⭐)`).join('\n')}`);
 }
 
 async function enviarMisBoletosMsg(chatId, userId) {
-  const sorteo = getSorteoActual();
+  const sorteo = await getSorteoActivo();
   if (!sorteo) { await enviarMensaje(chatId, '❌ No hay sorteo activo.'); return; }
   const misB = sorteo.boletos.filter(b => b.userId === userId && b.pagado);
   if (misB.length === 0) { await enviarMensaje(chatId, '❌ No tienes boletos en este sorteo.'); return; }
@@ -354,144 +294,114 @@ async function enviarMisBoletosMsg(chatId, userId) {
 }
 
 async function enviarInfoReferidos(chatId, userId) {
-  const usuario = getUsuario(userId);
+  const usuario = await getUsuario(userId);
   const link = `https://t.me/LuckyStarsOficial_bot?start=ref_${userId}`;
-  let text = `👥 *Tu sistema de referidos*\n\n`;
-  text += `🔗 *Tu link:* \`${link}\`\n\n`;
-  text += `✅ Referidos que compraron: *${usuario.referidosQueCompraron}*\n\n`;
-  text += `🎁 *Recompensas:*\n`;
-  text += `• Cada referido que compre = 1 boleto gratis\n`;
-  text += `• 5 referidos = 2 boletos extra\n`;
-  text += `• 10 referidos = 5 boletos extra\n\n`;
-  text += `¡Comparte tu link y gana boletos gratis!`;
-  await enviarMensaje(chatId, text);
+  await enviarMensaje(chatId, `👥 *Tu sistema de referidos*\n\n🔗 *Tu link:*\n\`${link}\`\n\n✅ Referidos que compraron: *${usuario.referidosQueCompraron}*\n\n🎁 *Recompensas:*\n• Cada referido que compre = 1 boleto gratis\n• 5 referidos = 2 boletos extra\n• 10 referidos = 5 boletos extra\n\n¡Comparte y gana!`);
 }
 
 // ─── API PÚBLICA ──────────────────────────────────────────────────────────────
-app.get('/api/sorteo', (req, res) => {
-  const sorteo = getSorteoActual();
+app.get('/api/sorteo', async (req, res) => {
+  const sorteo = await getSorteoActivo();
   if (!sorteo) return res.json({ error: 'No hay sorteo activo' });
   const vendidos = sorteo.boletos.filter(b => b.pagado).length;
-  res.json({
-    id: sorteo.id,
-    titulo: sorteo.titulo,
-    activo: sorteo.activo,
-    precioPorBoleto: sorteo.precioPorBoleto,
-    metaBoletos: sorteo.metaBoletos,
-    vendidos,
-    restantes: sorteo.metaBoletos - vendidos,
-    premios: sorteo.premios,
-    porcentaje: Math.round((vendidos / sorteo.metaBoletos) * 100)
-  });
+  res.json({ id: sorteo._id, titulo: sorteo.titulo, activo: sorteo.activo, precioPorBoleto: sorteo.precioPorBoleto, metaBoletos: sorteo.metaBoletos, vendidos, restantes: sorteo.metaBoletos - vendidos, premios: sorteo.premios, porcentaje: Math.round((vendidos / sorteo.metaBoletos) * 100) });
 });
 
-app.get('/api/mis-boletos/:userId', (req, res) => {
-  const sorteo = getSorteoActual();
+app.get('/api/mis-boletos/:userId', async (req, res) => {
+  const sorteo = await getSorteoActivo();
   if (!sorteo) return res.json([]);
-  const misB = sorteo.boletos.filter(b => b.userId === req.params.userId && b.pagado);
-  res.json(misB);
+  res.json(sorteo.boletos.filter(b => b.userId === req.params.userId && b.pagado));
 });
 
-app.get('/api/usuario/:userId', (req, res) => {
-  const usuario = getUsuario(req.params.userId);
+app.get('/api/usuario/:userId', async (req, res) => {
+  const usuario = await getUsuario(req.params.userId);
   const link = `https://t.me/LuckyStarsOficial_bot?start=ref_${req.params.userId}`;
   res.json({ ...usuario, linkReferido: link });
 });
 
 app.post('/api/crear-invoice', async (req, res) => {
   const { userId, cantidad } = req.body;
-  const sorteo = getSorteoActual();
+  const sorteo = await getSorteoActivo();
   if (!sorteo || !sorteo.activo) return res.json({ error: 'No hay sorteo activo' });
-
   const totalStars = cantidad * sorteo.precioPorBoleto;
   const result = await callTelegram('createInvoiceLink', {
     title: sorteo.titulo,
-    description: `${cantidad} boleto(s) — Premio mayor: ${sorteo.premios[0].monto} ⭐`,
-    payload: `boleto_${cantidad}_${sorteo.id}`,
+    description: `${cantidad} boleto(s) — Premio: $${(sorteo.premios[0].monto/50).toFixed(0)} USD`,
+    payload: `boleto_${cantidad}_${sorteo._id}`,
     currency: 'XTR',
     prices: [{ label: `${cantidad} boleto(s)`, amount: totalStars }]
   });
-
   if (result.ok) res.json({ invoiceUrl: result.result });
   else res.json({ error: result.description });
 });
 
+app.post('/api/reclamar-gratis', async (req, res) => {
+  const { userId } = req.body;
+  const sorteo = await getSorteoActivo();
+  const usuario = await getUsuario(userId);
+  if (!sorteo || !sorteo.activo) return res.json({ error: 'No hay sorteo activo' });
+  if (usuario.boletosGratisCanal) return res.json({ error: 'Ya reclamaste tu boleto gratis' });
+  const esMiembro = await verificarMembresia(userId);
+  if (!esMiembro) return res.json({ error: 'Únete a @LuckyStarsOficial primero' });
+  const numero = String(sorteo.boletos.length + 1).padStart(3, '0');
+  await db.collection('sorteos').updateOne({ activo: true }, { $push: { boletos: { numero, userId, username: usuario.username, fecha: new Date().toLocaleDateString('es-MX'), esBoletoGratis: true, pagado: true, motivo: 'canal' } } });
+  await db.collection('usuarios').updateOne({ userId }, { $set: { boletosGratisCanal: true, joinedCanal: true } });
+  res.json({ ok: true, numero });
+});
+
 // ─── ADMIN API ────────────────────────────────────────────────────────────────
 function verificarAdmin(req, res) {
-  const password = req.headers['x-admin-password'];
-  if (password !== ADMIN_PASSWORD) {
-    res.status(401).json({ error: 'No autorizado' });
-    return false;
-  }
+  if (req.headers['x-admin-password'] !== ADMIN_PASSWORD) { res.status(401).json({ error: 'No autorizado' }); return false; }
   return true;
 }
 
-app.get('/admin/stats', (req, res) => {
+app.get('/admin/stats', async (req, res) => {
   if (!verificarAdmin(req, res)) return;
-  const sorteo = getSorteoActual();
-  const vendidos = sorteo ? sorteo.boletos.filter(b => b.pagado).length : 0;
-  const totalUsuarios = Object.keys(db.usuarios).length;
+  const sorteo = await getSorteoActivo();
+  const totalUsuarios = await db.collection('usuarios').countDocuments();
+  const historialCount = await db.collection('historial').countDocuments();
   res.json({
-    sorteoActivo: sorteo ? { id: sorteo.id, titulo: sorteo.titulo, vendidos, metaBoletos: sorteo.metaBoletos, totalRecaudado: sorteo.totalRecaudado, premios: sorteo.premios } : null,
-    totalUsuarios,
-    historialSorteos: db.historial.length,
+    sorteoActivo: sorteo ? { id: sorteo._id, titulo: sorteo.titulo, vendidos: sorteo.boletos.filter(b => b.pagado).length, metaBoletos: sorteo.metaBoletos, totalRecaudado: sorteo.totalRecaudado, premios: sorteo.premios } : null,
+    totalUsuarios, historialSorteos: historialCount,
     boletos: sorteo ? sorteo.boletos : []
   });
 });
 
-app.post('/admin/crear-sorteo', (req, res) => {
+app.post('/admin/crear-sorteo', async (req, res) => {
+  if (!verificarAdmin(req, res)) return;
+  const sorteoActivo = await getSorteoActivo();
+  if (sorteoActivo) return res.json({ error: 'Ya hay un sorteo activo. Ciérralo primero.' });
+  const { titulo, precioPorBoleto, metaBoletos, premios } = req.body;
+  const sorteo = { titulo: titulo || 'Nuevo Sorteo Lucky Stars', activo: true, precioPorBoleto: precioPorBoleto || 50, metaBoletos: metaBoletos || 100, premios: premios || [{ lugar: 1, descripcion: '1er Premio', monto: 2500, moneda: 'Stars' }, { lugar: 2, descripcion: '2do Premio', monto: 1000, moneda: 'Stars' }, { lugar: 3, descripcion: '3er Premio', monto: 500, moneda: 'Stars' }], boletos: [], ganadores: [], fechaCreacion: new Date().toISOString(), fechaFin: null, totalRecaudado: 0 };
+  await db.collection('sorteos').insertOne(sorteo);
+  res.json({ ok: true, sorteo });
+});
+
+app.post('/admin/editar-sorteo', async (req, res) => {
   if (!verificarAdmin(req, res)) return;
   const { titulo, precioPorBoleto, metaBoletos, premios } = req.body;
-  if (db.sorteoActualId) {
-    const actual = getSorteoActual();
-    if (actual && actual.activo) {
-      return res.json({ error: 'Ya hay un sorteo activo. Ciérralo primero.' });
-    }
-  }
-  const sorteo = {
-    id: generarId(),
-    titulo: titulo || 'Nuevo Sorteo Lucky Stars',
-    activo: true,
-    precioPorBoleto: precioPorBoleto || 50,
-    metaBoletos: metaBoletos || 100,
-    premios: premios || [
-      { lugar: 1, descripcion: '1er Premio', monto: 2500, moneda: 'Stars' },
-      { lugar: 2, descripcion: '2do Premio', monto: 1000, moneda: 'Stars' },
-      { lugar: 3, descripcion: '3er Premio', monto: 500, moneda: 'Stars' }
-    ],
-    boletos: [],
-    ganadores: [],
-    fechaCreacion: new Date().toISOString(),
-    fechaFin: null,
-    totalRecaudado: 0
-  };
-  db.sorteos.push(sorteo);
-  db.sorteoActualId = sorteo.id;
-  res.json({ ok: true, sorteo });
+  const update = {};
+  if (titulo) update.titulo = titulo;
+  if (precioPorBoleto) update.precioPorBoleto = precioPorBoleto;
+  if (metaBoletos) update.metaBoletos = metaBoletos;
+  if (premios) update.premios = premios;
+  await db.collection('sorteos').updateOne({ activo: true }, { $set: update });
+  res.json({ ok: true });
 });
 
 app.post('/admin/cerrar-sorteo', async (req, res) => {
   if (!verificarAdmin(req, res)) return;
-  const sorteo = getSorteoActual();
+  const sorteo = await getSorteoActivo();
   if (!sorteo) return res.json({ error: 'No hay sorteo activo' });
   await realizarSorteo(sorteo);
   res.json({ ok: true, ganadores: sorteo.ganadores });
 });
 
-app.post('/admin/editar-sorteo', (req, res) => {
-  if (!verificarAdmin(req, res)) return;
-  const sorteo = getSorteoActual();
-  if (!sorteo) return res.json({ error: 'No hay sorteo activo' });
-  const { titulo, precioPorBoleto, metaBoletos, premios } = req.body;
-  if (titulo) sorteo.titulo = titulo;
-  if (precioPorBoleto) sorteo.precioPorBoleto = precioPorBoleto;
-  if (metaBoletos) sorteo.metaBoletos = metaBoletos;
-  if (premios) sorteo.premios = premios;
-  res.json({ ok: true, sorteo });
-});
-
 app.get('/', (req, res) => res.json({ status: 'Lucky Stars Backend activo ⭐' }));
 
-// Iniciar
-crearSorteoInicial();
-app.listen(PORT, () => console.log(`Lucky Stars Backend corriendo en puerto ${PORT}`));
+connectDB().then(() => {
+  app.listen(PORT, () => console.log(`Puerto ${PORT}`));
+}).catch(err => {
+  console.error('Error conectando MongoDB:', err);
+  process.exit(1);
+});
