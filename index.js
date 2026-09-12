@@ -102,6 +102,22 @@ app.post('/webhook', async (req, res) => {
     await callTelegram('answerPreCheckoutQuery', { pre_checkout_query_id: update.pre_checkout_query.id, ok: true });
   }
 
+    if (update.callback_query) {
+    const cb = update.callback_query;
+    await callTelegram('answerCallbackQuery', { callback_query_id: cb.id });
+    if (cb.data && cb.data.startsWith('ref_')) {
+      const userId = cb.data.replace('ref_', '');
+      const link = `https://t.me/LuckyStarsOficial_bot?start=ref_${userId}`;
+      await callTelegram('sendMessage', {
+        chat_id: cb.message.chat.id,
+        text: `👥 *Tu link de referidos:*\n\n\`${link}\`\n\nCompártelo con tus amigos. Cuando compren su primer boleto, ¡tú ganas 1 boleto gratis!\n\n🏆 5 referidos = 2 boletos extra\n🌟 10 referidos = 5 boletos extra`,
+        parse_mode: 'Markdown'
+      });
+    }
+  }
+
+  if (update.message) {
+  
   if (update.message) {
     const msg = update.message;
     const userId = String(msg.from.id);
