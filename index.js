@@ -162,7 +162,8 @@ async function enviarBienvenida(chatId, userId) {
     text += `📊 *Vendidos:* ${vendidos}/${sorteo.metaBoletos}\n\n`;
     text += `🏆 *Premios:*\n`;
     sorteo.premios.forEach(p => {
-      text += `${p.lugar === 1 ? '🥇' : p.lugar === 2 ? '🥈' : '🥉'} ${p.descripcion}: ${p.monto} ⭐\n`;
+      const usd = (p.monto / 50).toFixed(0);
+      text += `${p.lugar === 1 ? '🥇' : p.lugar === 2 ? '🥈' : '🥉'} ${p.descripcion}: *$${usd} USD* (${p.monto} ⭐)\n`;
     });
   }
 
