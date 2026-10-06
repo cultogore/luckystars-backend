@@ -152,8 +152,9 @@ function resumenBoletos(boletos, dias = 14, hasta = new Date()) {
   };
 }
 
-function redondear(n) {
-  return Math.round(n * 100) / 100;
+function redondear(n, dec = 2) {
+  const f = Math.pow(10, dec);
+  return Math.round(n * f) / f;
 }
 
 module.exports = {

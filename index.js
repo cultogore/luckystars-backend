@@ -21,7 +21,7 @@ const PORT = process.env.PORT || 3000;
 let db;
 
 // ─── CONFIGURACIÓN (editable desde el panel admin) ───────────────────────────
-const CONFIG_DEFAULT = { adLimitDiario: 5, cooldownSeg: 15, cpmUsd: 3, avisoBienvenida: '' };
+const CONFIG_DEFAULT = { adLimitDiario: 5, cooldownSeg: 15, cpmUsd: 0.3, avisoBienvenida: '' };
 let configCache = { at: 0, value: { ...CONFIG_DEFAULT } };
 
 async function getConfig(forzar = false) {
@@ -393,7 +393,7 @@ app.get('/api/usuario/:userId', async (req, res) => {
     const u = await getUsuario(req.params.userId);
     res.json({
       userId: u.userId, username: u.username, firstName: u.firstName,
-      referidosQueCompraron: u.referidosQueCompraron || 0,
+      referidosQueCompraron: u.referidosQueCompraron || 0, canalReclamado: !!u.boletosGratisCanal,
       linkReferido: `https://t.me/${BOT_USERNAME}?start=ref_${u.userId}`
     });
   } catch (e) { res.status(500).json({ error: 'Error del servidor' }); }
@@ -414,7 +414,8 @@ app.get('/api/ad-status/:userId', async (req, res) => {
     const cfg = await getConfig();
     const usuario = await getUsuario(req.params.userId);
     const adsHoy = usuario.ultimoAdDia === L.diaMX() ? (usuario.adsHoy || 0) : 0;
-    res.json({ adsHoy, limite: cfg.adLimitDiario, restantes: Math.max(0, cfg.adLimitDiario - adsHoy) });
+    const espera = Math.max(0, Math.ceil(((usuario.ultimoAdTs || 0) + cfg.cooldownSeg * 1000 - Date.now()) / 1000));
+    res.json({ adsHoy, limite: cfg.adLimitDiario, restantes: Math.max(0, cfg.adLimitDiario - adsHoy), cooldownSeg: cfg.cooldownSeg, espera });
   } catch (e) { res.status(500).json({ error: 'Error del servidor' }); }
 });
 
@@ -462,7 +463,7 @@ app.post('/api/ad-reward', async (req, res) => {
     db.collection('ads').insertOne({ userId, ts: new Date(), day: hoy }).catch(() => {});
     procesarReferido(usuario).catch(e => console.error('Error en referido:', e));
 
-    res.json({ ok: true, numero: r.numero, lleno: r.lleno, adsHoy: usuario.adsHoy, limite: cfg.adLimitDiario, restantes: cfg.adLimitDiario - usuario.adsHoy });
+    res.json({ ok: true, numero: r.numero, lleno: r.lleno, adsHoy: usuario.adsHoy, limite: cfg.adLimitDiario, restantes: cfg.adLimitDiario - usuario.adsHoy, cooldownSeg: cfg.cooldownSeg });
   } catch (e) {
     console.error('Error en ad-reward:', e);
     res.status(500).json({ error: 'Error del servidor' });
@@ -524,7 +525,7 @@ app.get('/admin/stats', admin(async (req, res) => {
     ultimos7: suma(adsPorDia.slice(-7)), ultimos14: suma(adsPorDia),
     unicosHoy: unicosHoy.length, porDia: adsPorDia
   };
-  const porMil = n => L.redondear((n * cfg.cpmUsd) / 1000);
+  const porMil = n => L.redondear((n * cfg.cpmUsd) / 1000, 4);
 
   let pendientes = 0, pendientesUsd = 0, pagadoUsd = 0;
   for (const h of historial) for (const g of h.ganadores || []) {
@@ -556,7 +557,8 @@ app.get('/admin/stats', admin(async (req, res) => {
     ingresos: {
       cpmUsd: cfg.cpmUsd, hoyUsd: porMil(anuncios.hoy), ultimos7Usd: porMil(anuncios.ultimos7), ultimos14Usd: porMil(anuncios.ultimos14),
       premiosSorteoUsd: activo ? activo.premioTotalUsd : 0,
-      gananciaEstimadaUsd: activo ? L.redondear(porMil(anuncios.ultimos14) - activo.premioTotalUsd) : null
+      gananciaEstimadaUsd: activo ? L.redondear(porMil(anuncios.ultimos14) - activo.premioTotalUsd, 4) : null,
+      porAnuncioUsd: cfg.cpmUsd / 1000
     }
   });
 }));
