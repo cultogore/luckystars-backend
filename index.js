@@ -50,7 +50,7 @@ async function getSorteoActivo() {
 async function getUsuario(userId) {
   let usuario = await db.collection('usuarios').findOne({ userId });
   if (!usuario) {
-    usuario = { userId, username: '', firstName: '', referidoPor: null, referidosQueCompraron: 0, joinedCanal: false, totalComprado: 0, boletosGratisCanal: false, fechaRegistro: new Date().toISOString() };
+    usuario = { userId, username: '', firstName: '', referidoPor: null, referidosQueCompraron: 0, joinedCanal: false, totalComprado: 0, boletosGratisCanal: false, adsHoy: 0, ultimoAdDia: '', fechaRegistro: new Date().toISOString() };
     await db.collection('usuarios').insertOne(usuario);
   }
   return usuario;
@@ -316,6 +316,57 @@ app.post('/api/reclamar-gratis', async (req, res) => {
   await db.collection('sorteos').updateOne({ activo: true }, { $push: { boletos: { numero, userId, username: usuario.username, fecha: new Date().toLocaleDateString('es-MX'), esBoletoGratis: true, pagado: true, motivo: 'canal' } } });
   await db.collection('usuarios').updateOne({ userId }, { $set: { boletosGratisCanal: true, joinedCanal: true } });
   res.json({ ok: true, numero });
+});
+
+// ─── AD REWARD API ───────────────────────────────────────────────────────────
+const AD_LIMIT_DIARIO = 5;
+
+function hoyStr() {
+  return new Date().toISOString().slice(0, 10); // "2026-10-05"
+}
+
+app.post('/api/ad-reward', async (req, res) => {
+  const { userId } = req.body;
+  if (!userId) return res.json({ error: 'userId requerido' });
+
+  const sorteo = await getSorteoActivo();
+  if (!sorteo || !sorteo.activo) return res.json({ error: 'No hay sorteo activo' });
+
+  const usuario = await getUsuario(userId);
+  const hoy = hoyStr();
+
+  // Reset contador si es un nuevo día
+  let adsHoy = usuario.adsHoy || 0;
+  if (usuario.ultimoAdDia !== hoy) {
+    adsHoy = 0;
+  }
+
+  if (adsHoy >= AD_LIMIT_DIARIO) {
+    return res.json({ error: 'Límite diario alcanzado', adsHoy, limite: AD_LIMIT_DIARIO });
+  }
+
+  // Dar boleto
+  const numero = String(sorteo.boletos.length + 1).padStart(3, '0');
+  await db.collection('sorteos').updateOne(
+    { activo: true },
+    { $push: { boletos: { numero, userId, username: usuario.username || usuario.firstName, fecha: new Date().toLocaleDateString('es-MX'), esBoletoGratis: true, pagado: true, motivo: 'ad_watched' } } }
+  );
+
+  adsHoy += 1;
+  await db.collection('usuarios').updateOne(
+    { userId },
+    { $set: { adsHoy, ultimoAdDia: hoy } }
+  );
+
+  res.json({ ok: true, numero, adsHoy, limite: AD_LIMIT_DIARIO, restantes: AD_LIMIT_DIARIO - adsHoy });
+});
+
+app.get('/api/ad-status/:userId', async (req, res) => {
+  const usuario = await getUsuario(req.params.userId);
+  const hoy = hoyStr();
+  let adsHoy = usuario.adsHoy || 0;
+  if (usuario.ultimoAdDia !== hoy) adsHoy = 0;
+  res.json({ adsHoy, limite: AD_LIMIT_DIARIO, restantes: AD_LIMIT_DIARIO - adsHoy });
 });
 
 // ─── ADMIN API ────────────────────────────────────────────────────────────────
